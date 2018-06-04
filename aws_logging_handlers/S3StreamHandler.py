@@ -2,7 +2,7 @@ __author__ = 'Omri Eival'
 
 from logging import StreamHandler
 from io import BufferedIOBase, BytesIO
-from boto3 import Session
+import boto3
 from datetime import datetime
 from aws_logging_handlers.validation import is_non_empty_string, is_positive_int, is_boolean, bad_type_error, \
     empty_str_err, bad_integer_err, ValidationRule
@@ -20,14 +20,20 @@ MAX_FILE_SIZE_BYTES = 100 * 1024 ** 2  # 100 MB
 MIN_WORKERS_NUM = 2
 
 
+s3_resource = boto3.resource('s3')
+
+
 class StreamObject:
     """
     Class representation of the s3 object along with all the needed metadata to stream to S3
     """
 
-    def __init__(self, s3_resource, bucket_name, filename, buffer_queue):
+    def __init__(self, s3_resource, bucket_name, filename, buffer_queue,
+                 ServerSideEncryption=None, SSEKMSKeyId=None):
         self.object = s3_resource.Object(bucket_name, filename)
-        self.uploader = self.object.initiate_multipart_upload()
+        self.uploader = self.object.initiate_multipart_upload(
+            ServerSideEncryption=ServerSideEncryption, SSEKMSKeyId=SSEKMSKeyId
+        )
         self.bucket = bucket_name
         try:
             total_bytes = s3_resource.meta.client.head_object(Bucket=self.bucket.name, Key=filename)
@@ -55,28 +61,25 @@ class S3Streamer(BufferedIOBase):
     _stream_buffer_queue = queue.Queue()
     _rotation_queue = queue.Queue()
 
-    def __init__(self, bucket, key_id, secret, key, chunk_size=DEFAULT_CHUNK_SIZE,
+    def __init__(self, bucket, key_id, chunk_size=DEFAULT_CHUNK_SIZE,
                  max_file_log_time=DEFAULT_ROTATION_TIME_SECS, max_file_size_bytes=MAX_FILE_SIZE_BYTES,
                  encoder='utf-8', workers=2, compress=False):
-
-        self.session = Session(key_id, secret)
-        self.s3 = self.session.resource('s3')
         self.start_time = int(datetime.utcnow().strftime('%s'))
-        self.key = key.strip('/')
+        self.key = key_id.strip('/')
         self.chunk_size = chunk_size
         self.max_file_log_time = max_file_log_time
         self.max_file_size_bytes = max_file_size_bytes
-        self.current_file_name = "{}_{}".format(key, int(datetime.utcnow().strftime('%s')))
+        self.current_file_name = '{}_{}'.format(key_id, int(datetime.utcnow().strftime('%s')))
         if compress:
-            self.current_file_name = "{}.gz".format(self.current_file_name)
+            self.current_file_name = '{}.gz'.format(self.current_file_name)
         self.encoder = encoder
 
         try:
-            self.s3.meta.client.head_bucket(Bucket=bucket)
+            s3_resource.meta.client.head_bucket(Bucket=bucket)
         except Exception:
             raise ValueError('Bucket %s does not exist, or missing permissions' % bucket)
 
-        self._bucket = self.s3.Bucket(bucket)
+        self._bucket = s3_resource.Bucket(bucket)
         self._current_object = self._get_stream_object(self.current_file_name)
         self.workers = [threading.Thread(target=task_worker, args=(self._rotation_queue,)).start() for _ in
                         range(int(max(workers, MIN_WORKERS_NUM) / 2) + 1)]
@@ -89,10 +92,10 @@ class S3Streamer(BufferedIOBase):
         BufferedIOBase.__init__(self)
 
     def get_filename(self):
-        filename = "{}_{}".format(self.key, self.start_time)
+        filename = '{}_{}'.format(self.key, self.start_time)
         if not self.compress:
             return filename
-        return "{}.gz".format(filename)
+        return '{}.gz'.format(filename)
 
     def add_task(self, task):
         self._rotation_queue.put(task)
@@ -102,14 +105,14 @@ class S3Streamer(BufferedIOBase):
 
     def _get_stream_object(self, filename):
         try:
-            return StreamObject(self.s3, self._bucket.name, filename, self._stream_buffer_queue)
+            return StreamObject(s3_resource, self._bucket.name, filename, self._stream_buffer_queue)
 
         except Exception:
             raise RuntimeError('Failed to open new S3 stream object')
 
     def _rotate_chunk(self, async=True):
 
-        assert self._current_object, "Stream object not found"
+        assert self._current_object, 'Stream object not found'
 
         part_num = self._current_object.chunk_count + 1
         part = self._current_object.uploader.Part(part_num)
