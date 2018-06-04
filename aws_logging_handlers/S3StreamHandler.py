@@ -61,15 +61,17 @@ class S3Streamer(BufferedIOBase):
     _stream_buffer_queue = queue.Queue()
     _rotation_queue = queue.Queue()
 
-    def __init__(self, bucket, key_id, chunk_size=DEFAULT_CHUNK_SIZE,
-                 max_file_log_time=DEFAULT_ROTATION_TIME_SECS, max_file_size_bytes=MAX_FILE_SIZE_BYTES,
+    def __init__(self, bucket, file_path, chunk_size=DEFAULT_CHUNK_SIZE,
+                 max_file_log_time=DEFAULT_ROTATION_TIME_SECS,
+                 max_file_size_bytes=MAX_FILE_SIZE_BYTES,
+                 ServerSideEncryption=None, SSEKMSKeyId=None
                  encoder='utf-8', workers=2, compress=False):
         self.start_time = int(datetime.utcnow().strftime('%s'))
-        self.key = key_id.strip('/')
+        self.key = file_path.strip('/')
         self.chunk_size = chunk_size
         self.max_file_log_time = max_file_log_time
         self.max_file_size_bytes = max_file_size_bytes
-        self.current_file_name = '{}_{}'.format(key_id, int(datetime.utcnow().strftime('%s')))
+        self.current_file_name = '{}_{}'.format(file_path, int(datetime.utcnow().strftime('%s')))
         if compress:
             self.current_file_name = '{}.gz'.format(self.current_file_name)
         self.encoder = encoder
@@ -105,7 +107,10 @@ class S3Streamer(BufferedIOBase):
 
     def _get_stream_object(self, filename):
         try:
-            return StreamObject(s3_resource, self._bucket.name, filename, self._stream_buffer_queue)
+            return StreamObject(
+                s3_resource, self._bucket.name, filename, self._stream_buffer_queue,
+                ServerSideEncryption=ServerSideEncryption, SSEKMSKeyId=SSEKMSKeyId
+            )
 
         except Exception:
             raise RuntimeError('Failed to open new S3 stream object')
@@ -203,15 +208,15 @@ class S3Handler(StreamHandler):
     A Logging handler class that streams log records to S3 by chunks
     """
 
-    def __init__(self, file_path, bucket, key_id, secret, chunk_size=DEFAULT_CHUNK_SIZE,
-                 time_rotation=DEFAULT_ROTATION_TIME_SECS, max_file_size_bytes=MAX_FILE_SIZE_BYTES, encoder='utf-8',
+    def __init__(self, file_path, bucket, chunk_size=DEFAULT_CHUNK_SIZE,
+                 ServerSideEncryption=None, SSEKMSKeyId=None
+                 time_rotation=DEFAULT_ROTATION_TIME_SECS,
+                 max_file_size_bytes=MAX_FILE_SIZE_BYTES, encoder='utf-8',
                  max_threads=3, compress=False):
         """
 
         :param file_path: The path of the S3 object
         :param bucket: The id of the S3 bucket
-        :param key_id: Authentication key
-        :param secret: Authentication secret
         :param chunk_size: Size of a chunk in the multipart upload in bytes - default 5MB
         :param time_rotation: Interval in seconds to rotate the file by - default 12 hours
         :param max_file_size_bytes: Maximum file size in bytes before rotation - default 100MB
@@ -223,8 +228,6 @@ class S3Handler(StreamHandler):
         args_validation = (
             ValidationRule(file_path, is_non_empty_string, empty_str_err('file_path')),
             ValidationRule(bucket, is_non_empty_string, empty_str_err('bucket')),
-            ValidationRule(key_id, is_non_empty_string, empty_str_err('key_id')),
-            ValidationRule(secret, is_non_empty_string, empty_str_err('secret')),
             ValidationRule(chunk_size, is_positive_int, bad_integer_err('chunk_size')),
             ValidationRule(time_rotation, is_positive_int, bad_integer_err('time_rotation')),
             ValidationRule(max_file_size_bytes, is_positive_int, bad_integer_err('max_file_size_bytes')),
@@ -237,9 +240,8 @@ class S3Handler(StreamHandler):
             assert rule[1](rule[0]), rule[3]
 
         self.bucket = bucket
-        self.secret = secret
-        self.key_id = key_id
-        self.stream = S3Streamer(self.bucket, self.key_id, self.secret, file_path, chunk_size, time_rotation,
+        self.stream = S3Streamer(self.bucket, file_path, chunk_size, time_rotation,
+                                 ServerSideEncryption=ServerSideEncryption, SSEKMSKeyId=SSEKMSKeyId,
                                  max_file_size_bytes, encoder, workers=max_threads, compress=compress)
 
         # Make sure we gracefully clear the buffers and upload the missing parts before exiting
